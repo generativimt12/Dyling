@@ -13,14 +13,12 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
-import android.os.Handler;
 import android.widget.TextView;
 
-public class MainActivity extends Activity implements SurfaceHolder.Callback {
+public class MainActivity extends Activity {
     private static final int PICK_VIDEO = 1001;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
@@ -206,7 +204,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
     }
 
-    private int delayMs() { return delayBar == null ? 300 : delayBar.getProgress(); }
 
     private void togglePlayback() {
         if (audioPlayer == null || videoPlayer == null) return;
