@@ -128,9 +128,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
             public void onStartTrackingTouch(SeekBar b) { userSeeking = true; }
             public void onStopTrackingTouch(SeekBar b) {
-                if (audioPlayer != null && audioPlayer.isPrepared()) {
+                if (audioPlayer != null && preparedAudio) {
                     int duration = audioPlayer.getDuration();
-                    int pos = (int)((p / 1000f) * duration);
+                    int pos = (int)((b.getProgress() / 1000f) * duration);
                     seekBoth(pos);
                 }
                 userSeeking = false;
