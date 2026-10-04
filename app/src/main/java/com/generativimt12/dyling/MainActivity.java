@@ -4,10 +4,6 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import androidx.media3.common.MediaItem;
-import androidx.media3.common.Player;
-import androidx.media3.exoplayer.ExoPlayer;
-import androidx.media3.ui.PlayerView;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -18,24 +14,36 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.Player;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.SeekParameters;
+import androidx.media3.ui.PlayerView;
+
 public class MainActivity extends Activity {
     private static final int PICK_VIDEO = 1001;
-    private final Handler handler = new Handler(Looper.getMainLooper());
+    private static final long SYNC_INTERVAL_MS = 50L;
+    private static final long HARD_RESYNC_MS = 120L;
+    private static final float MAX_FINE_SPEED = 0.025f;
+
+    private final Handler syncHandler = new Handler(Looper.getMainLooper());
+    private final Runnable syncRunnable = new Runnable() {
+        @Override public void run() {
+            synchronizeVideo();
+            if (audioPlayer != null && audioPlayer.isPlaying()) {
+                syncHandler.postDelayed(this, SYNC_INTERVAL_MS);
+            }
+        }
+    };
 
     private PlayerView playerView;
     private ExoPlayer audioPlayer;
     private ExoPlayer videoPlayer;
-    private Handler syncHandler = new Handler(Looper.getMainLooper());
-    private Uri videoUri;
-
     private SeekBar delayBar;
-    private SeekBar positionBar;
     private TextView delayValue;
     private TextView status;
-    private TextView time;
     private Button playPause;
-    private boolean preparedAudio;
-    private boolean preparedVideo;
+    private boolean correcting;
     private boolean userSeeking;
 
     private int delayMs() {
@@ -43,20 +51,22 @@ public class MainActivity extends Activity {
     }
 
     private int dp(int v) {
-        return (int)(v * getResources().getDisplayMetrics().density + 0.5f);
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         buildUi();
-        if (getIntent() != null && getIntent().getData() != null) {
-            openVideo(getIntent().getData());
+
+        Intent intent = getIntent();
+        if (intent != null && intent.getData() != null) {
+            openVideo(intent.getData());
         }
     }
 
-    private TextView label(String s, float size, int color) {
+    private TextView label(String text, float size, int color) {
         TextView t = new TextView(this);
-        t.setText(s);
+        t.setText(text);
         t.setTextSize(size);
         t.setTextColor(color);
         t.setGravity(Gravity.CENTER_VERTICAL);
@@ -78,7 +88,8 @@ public class MainActivity extends Activity {
         TextView title = label("Dyling", 30, white);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title, new LinearLayout.LayoutParams(-1, dp(42)));
-        root.addView(label("Universal video sync player", 14, muted), new LinearLayout.LayoutParams(-1, dp(28)));
+        root.addView(label("Universal video sync player", 14, muted),
+                new LinearLayout.LayoutParams(-1, dp(28)));
 
         playerView = new PlayerView(this);
         playerView.setUseController(true);
@@ -93,7 +104,7 @@ public class MainActivity extends Activity {
         controls.setBackground(round(card, dp(20)));
         root.addView(controls, new LinearLayout.LayoutParams(-1, dp(190)));
 
-        controls.addView(label("Video offset — positive = video starts later", 14, muted),
+        controls.addView(label("Video offset — video starts later than audio", 14, muted),
                 new LinearLayout.LayoutParams(-1, dp(28)));
 
         delayValue = label("300 ms", 28, white);
@@ -106,12 +117,18 @@ public class MainActivity extends Activity {
         delayBar.setProgress(300);
         controls.addView(delayBar, new LinearLayout.LayoutParams(-1, dp(48)));
         delayBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
+            @Override public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
                 delayValue.setText(p + " ms");
-                if (fromUser && audioPlayer != null && videoPlayer != null) { audioPlayer.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC); videoPlayer.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC); }
             }
-            public void onStartTrackingTouch(SeekBar b) {}
-            public void onStopTrackingTouch(SeekBar b) { if (audioPlayer != null && videoPlayer != null) { long p = audioPlayer.getCurrentPosition(); audioPlayer.seekTo(p); videoPlayer.seekTo(p); } }
+
+            @Override public void onStartTrackingTouch(SeekBar b) {
+                userSeeking = true;
+            }
+
+            @Override public void onStopTrackingTouch(SeekBar b) {
+                userSeeking = false;
+                resyncNow();
+            }
         });
 
         LinearLayout row = new LinearLayout(this);
@@ -129,9 +146,8 @@ public class MainActivity extends Activity {
         status = label("Choose any video file from the device", 12, muted);
         status.setPadding(dp(2), dp(8), dp(2), 0);
         root.addView(status, new LinearLayout.LayoutParams(-1, dp(30)));
-        setContentView(root);
 
-        if (getIntent() != null && getIntent().getData() != null) openVideo(getIntent().getData());
+        setContentView(root);
     }
 
     private Button button(String text, int bg, int fg) {
@@ -145,7 +161,8 @@ public class MainActivity extends Activity {
     }
 
     private android.graphics.drawable.GradientDrawable round(int color, int radius) {
-        android.graphics.drawable.GradientDrawable d = new android.graphics.drawable.GradientDrawable();
+        android.graphics.drawable.GradientDrawable d =
+                new android.graphics.drawable.GradientDrawable();
         d.setColor(color);
         d.setCornerRadius(radius);
         return d;
@@ -155,23 +172,33 @@ public class MainActivity extends Activity {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("video/*");
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         startActivityForResult(i, PICK_VIDEO);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == PICK_VIDEO && result == RESULT_OK && data != null && data.getData() != null) {
-            try { getContentResolver().takePersistableUriPermission(data.getData(), Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignored) {}
+        if (request == PICK_VIDEO && result == RESULT_OK &&
+                data != null && data.getData() != null) {
+            try {
+                getContentResolver().takePersistableUriPermission(
+                        data.getData(), Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
             openVideo(data.getData());
         }
     }
 
     private void openVideo(Uri uri) {
-        releasePlayer();
+        releasePlayers();
+
         try {
             audioPlayer = new ExoPlayer.Builder(this).build();
             videoPlayer = new ExoPlayer.Builder(this).build();
+
+            audioPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC);
+            videoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC);
 
             playerView.setPlayer(videoPlayer);
             videoPlayer.setVolume(0f);
@@ -180,38 +207,43 @@ public class MainActivity extends Activity {
             audioPlayer.setMediaItem(item);
             videoPlayer.setMediaItem(item);
 
-            audioPlayer.prepare();
-            videoPlayer.prepare();
-            videoPlayer.pause();
-
             Player.Listener listener = new Player.Listener() {
                 @Override public void onPlaybackStateChanged(int state) {
                     if (state == Player.STATE_READY) {
-                        status.setText("Ready • video starts " + delayMs() + " ms after audio");
+                        status.setText("Ready • audio is master clock");
                         playPause.setText("Play");
                     } else if (state == Player.STATE_BUFFERING) {
                         status.setText("Buffering…");
+                    } else if (state == Player.STATE_ENDED) {
+                        syncHandler.removeCallbacks(syncRunnable);
+                        playPause.setText("Play");
+                        status.setText("Finished");
                     }
                 }
             };
             audioPlayer.addListener(listener);
-            videoUri = uri;
+
+            audioPlayer.prepare();
+            videoPlayer.prepare();
+            videoPlayer.pause();
             status.setText("Loading video…");
             playPause.setText("Loading…");
         } catch (Exception ex) {
             status.setText("This video could not be opened");
-            releasePlayer();
+            releasePlayers();
         }
     }
 
-
     private void togglePlayback() {
         if (audioPlayer == null || videoPlayer == null) return;
+
         if (audioPlayer.isPlaying()) {
             audioPlayer.pause();
             videoPlayer.pause();
-            syncHandler.removeCallbacksAndMessages(null);
+            videoPlayer.setPlaybackSpeed(1f);
+            syncHandler.removeCallbacks(syncRunnable);
             playPause.setText("Play");
+            status.setText("Paused");
         } else {
             startSynced();
         }
@@ -219,35 +251,92 @@ public class MainActivity extends Activity {
 
     private void startSynced() {
         if (audioPlayer == null || videoPlayer == null) return;
-        syncHandler.removeCallbacksAndMessages(null);
 
-        long pos = Math.max(0, audioPlayer.getCurrentPosition());
-        audioPlayer.seekTo(pos);
-        videoPlayer.seekTo(pos);
+        syncHandler.removeCallbacks(syncRunnable);
+        long audioPos = Math.max(0L, audioPlayer.getCurrentPosition());
+        long videoStart = Math.max(0L, audioPos - delayMs());
+
+        audioPlayer.seekTo(audioPos);
+        videoPlayer.seekTo(videoStart);
+        videoPlayer.setPlaybackSpeed(1f);
         videoPlayer.pause();
 
-        // Critical design: audio begins now. Video renderer begins only after the
-        // selected offset, compensating for Bluetooth output latency.
         audioPlayer.play();
         syncHandler.postDelayed(() -> {
             if (audioPlayer != null && videoPlayer != null && audioPlayer.isPlaying()) {
                 videoPlayer.play();
+                syncHandler.post(syncRunnable);
             }
         }, delayMs());
 
-        status.setText("Playing • video delayed " + delayMs() + " ms");
+        status.setText("Playing • continuously synchronized");
         playPause.setText("Pause");
     }
 
-    private void releasePlayer() {
-        syncHandler.removeCallbacksAndMessages(null);
-        if (audioPlayer != null) { audioPlayer.release(); audioPlayer = null; }
-        if (videoPlayer != null) { videoPlayer.release(); videoPlayer = null; }
-        if (playerView != null) playerView.setPlayer(null);
+    private void synchronizeVideo() {
+        if (audioPlayer == null || videoPlayer == null ||
+                !audioPlayer.isPlaying() || userSeeking || correcting) {
+            return;
+        }
+
+        long audioPosition = audioPlayer.getCurrentPosition();
+        long targetVideoPosition = Math.max(0L, audioPosition - delayMs());
+        long actualVideoPosition = videoPlayer.getCurrentPosition();
+        long error = targetVideoPosition - actualVideoPosition;
+
+        if (Math.abs(error) > HARD_RESYNC_MS) {
+            correcting = true;
+            videoPlayer.setPlaybackSpeed(1f);
+            videoPlayer.seekTo(targetVideoPosition);
+            correcting = false;
+            return;
+        }
+
+        // Fine correction: keep audio untouched and gently steer video.
+        // Positive error means video is behind; speed it up slightly.
+        float correction = Math.max(-MAX_FINE_SPEED,
+                Math.min(MAX_FINE_SPEED, error / 4000f));
+        videoPlayer.setPlaybackSpeed(1f + correction);
+    }
+
+    private void resyncNow() {
+        if (audioPlayer == null || videoPlayer == null) return;
+
+        long audioPosition = Math.max(0L, audioPlayer.getCurrentPosition());
+        long target = Math.max(0L, audioPosition - delayMs());
+
+        correcting = true;
+        videoPlayer.setPlaybackSpeed(1f);
+        videoPlayer.seekTo(target);
+        correcting = false;
+
+        if (audioPlayer.isPlaying()) {
+            videoPlayer.play();
+            syncHandler.removeCallbacks(syncRunnable);
+            syncHandler.post(syncRunnable);
+        }
+        status.setText("Sync target: " + delayMs() + " ms");
+    }
+
+    private void releasePlayers() {
+        syncHandler.removeCallbacks(syncRunnable);
+        correcting = false;
+
+        if (audioPlayer != null) {
+            audioPlayer.release();
+            audioPlayer = null;
+        }
+        if (videoPlayer != null) {
+            videoPlayer.release();
+            videoPlayer = null;
+        }
+        if (playerView != null) {
+            playerView.setPlayer(null);
+        }
     }
 
     @Override protected void onDestroy() {
-        releasePlayer();
+        releasePlayers();
         super.onDestroy();
     }
 }
