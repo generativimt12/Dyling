@@ -1,40 +1,60 @@
 package com.generativimt12.dyling;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
-import android.content.SharedPreferences;
-import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.media.projection.MediaProjectionManager;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
-public class MainActivity extends Activity {
-    private static final int REQ_CAPTURE = 42;
-    private static final int REQ_MIC = 43;
+public class MainActivity extends Activity implements SurfaceHolder.Callback {
+    private static final int PICK_VIDEO = 1001;
+    private final Handler handler = new Handler(Looper.getMainLooper());
 
-    private SharedPreferences prefs;
-    private TextView value;
+    private SurfaceView surfaceView;
+    private MediaPlayer audioPlayer;
+    private MediaPlayer videoPlayer;
+    private Uri videoUri;
+
+    private SeekBar delayBar;
+    private SeekBar positionBar;
+    private TextView delayValue;
     private TextView status;
-    private Button power;
+    private TextView time;
+    private Button playPause;
+    private boolean preparedAudio;
+    private boolean preparedVideo;
+    private boolean userSeeking;
+
+    private int delayMs() {
+        return delayBar == null ? 300 : delayBar.getProgress();
+    }
+
+    private int dp(int v) {
+        return (int)(v * getResources().getDisplayMetrics().density + 0.5f);
+    }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        prefs = getSharedPreferences("dyling", MODE_PRIVATE);
         buildUi();
+        if (getIntent() != null && getIntent().getData() != null) {
+            openVideo(getIntent().getData());
+        }
     }
 
-    private int dp(float v) {
-        return (int)(v * getResources().getDisplayMetrics().density + .5f);
-    }
-
-    private TextView text(String s, float size, int color) {
+    private TextView label(String s, float size, int color) {
         TextView t = new TextView(this);
         t.setText(s);
         t.setTextSize(size);
@@ -44,85 +64,111 @@ public class MainActivity extends Activity {
     }
 
     private void buildUi() {
-        int bg = Color.rgb(9, 13, 26);
-        int card = Color.rgb(20, 27, 48);
+        int bg = Color.rgb(8, 11, 22);
+        int card = Color.rgb(19, 25, 43);
         int white = Color.WHITE;
-        int muted = Color.rgb(164, 175, 202);
-        int accent = Color.rgb(124, 92, 255);
+        int muted = Color.rgb(165, 175, 199);
+        int accent = Color.rgb(113, 91, 255);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(22), dp(20), dp(22), dp(20));
+        root.setPadding(dp(18), dp(16), dp(18), dp(16));
         root.setBackgroundColor(bg);
 
-        TextView title = text("Dyling", 32, white);
+        TextView title = label("Dyling", 30, white);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        root.addView(title, new LinearLayout.LayoutParams(-1, dp(46)));
+        root.addView(title, new LinearLayout.LayoutParams(-1, dp(42)));
 
-        TextView sub = text("Bluetooth audio • video sync", 15, muted);
-        root.addView(sub, new LinearLayout.LayoutParams(-1, dp(30)));
+        TextView sub = label("Video sync for late Bluetooth audio", 14, muted);
+        root.addView(sub, new LinearLayout.LayoutParams(-1, dp(28)));
 
-        LinearLayout cardView = new LinearLayout(this);
-        cardView.setOrientation(LinearLayout.VERTICAL);
-        cardView.setPadding(dp(20), dp(18), dp(20), dp(18));
-        cardView.setBackground(round(card, dp(22)));
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, dp(285));
-        cp.topMargin = dp(24);
-        root.addView(cardView, cp);
+        surfaceView = new SurfaceView(this);
+        surfaceView.getHolder().addCallback(this);
+        surfaceView.setBackgroundColor(Color.BLACK);
+        LinearLayout.LayoutParams vp = new LinearLayout.LayoutParams(-1, 0, 1f);
+        vp.topMargin = dp(14);
+        root.addView(surfaceView, vp);
 
-        TextView heading = text("Audio correction", 16, muted);
-        cardView.addView(heading, new LinearLayout.LayoutParams(-1, dp(28)));
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controls.setPadding(dp(16), dp(14), dp(16), dp(12));
+        controls.setBackground(round(card, dp(20)));
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, dp(250));
+        cp.topMargin = dp(12);
+        root.addView(controls, cp);
 
-        value = text("", 42, white);
-        value.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        value.setGravity(Gravity.CENTER);
-        cardView.addView(value, new LinearLayout.LayoutParams(-1, dp(72)));
+        TextView d = label("Delay video relative to audio", 14, muted);
+        controls.addView(d, new LinearLayout.LayoutParams(-1, dp(28)));
 
-        SeekBar seek = new SeekBar(this);
-        seek.setMax(2000);
-        seek.setProgress(prefs.getInt("delay", 0));
-        cardView.addView(seek, new LinearLayout.LayoutParams(-1, dp(52)));
-        updateValue(seek.getProgress());
+        delayValue = label("300 ms", 28, white);
+        delayValue.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        delayValue.setGravity(Gravity.CENTER);
+        controls.addView(delayValue, new LinearLayout.LayoutParams(-1, dp(42)));
 
-        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+        delayBar = new SeekBar(this);
+        delayBar.setMax(2000);
+        delayBar.setProgress(300);
+        controls.addView(delayBar, new LinearLayout.LayoutParams(-1, dp(46)));
+        delayBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
-                updateValue(p);
+                delayValue.setText(p + " ms");
             }
             public void onStartTrackingTouch(SeekBar b) {}
-            public void onStopTrackingTouch(SeekBar b) {}
+            public void onStopTrackingTouch(SeekBar b) {
+                if (fromPlaying()) restartSynced();
+            }
         });
 
-        LinearLayout bounds = new LinearLayout(this);
-        TextView zero = text("0 ms", 12, muted);
-        TextView max = text("2000 ms", 12, muted);
-        bounds.addView(zero, new LinearLayout.LayoutParams(0, dp(24), 1));
-        max.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        bounds.addView(max, new LinearLayout.LayoutParams(0, dp(24), 1));
-        cardView.addView(bounds);
+        positionBar = new SeekBar(this);
+        positionBar.setMax(1000);
+        controls.addView(positionBar, new LinearLayout.LayoutParams(-1, dp(40)));
+        positionBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
+                if (fromUser) userSeeking = true;
+            }
+            public void onStartTrackingTouch(SeekBar b) { userSeeking = true; }
+            public void onStopTrackingTouch(SeekBar b) {
+                if (audioPlayer != null && audioPlayer.isPrepared()) {
+                    int duration = audioPlayer.getDuration();
+                    int pos = (int)((p / 1000f) * duration);
+                    seekBoth(pos);
+                }
+                userSeeking = false;
+            }
+        });
 
-        status = text("Ready", 14, muted);
-        status.setPadding(dp(2), dp(18), dp(2), 0);
-        root.addView(status, new LinearLayout.LayoutParams(-1, dp(48)));
+        time = label("00:00 / 00:00", 12, muted);
+        controls.addView(time, new LinearLayout.LayoutParams(-1, dp(24)));
 
-        power = new Button(this);
-        power.setText("Start capture");
-        power.setTextSize(16);
-        power.setAllCaps(false);
-        power.setTextColor(white);
-        power.setBackground(round(accent, dp(18)));
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, dp(58));
-        bp.topMargin = dp(8);
-        root.addView(power, bp);
-        power.setOnClickListener(v -> startCapture());
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER);
+        Button open = button("Choose video", accent, white);
+        playPause = button("Play", Color.rgb(45, 52, 76), white);
+        row.addView(open, new LinearLayout.LayoutParams(0, dp(52), 1));
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(0, dp(52), 1);
+        pp.leftMargin = dp(8);
+        row.addView(playPause, pp);
+        controls.addView(row);
 
-        TextView info = text(
-            "Important: if Bluetooth audio is already LATE compared with the video, adding audio delay makes it worse. A normal APK cannot make source audio play before it arrives. In that case the correct compensation is to delay the VIDEO by the measured amount inside the player.",
-            13, muted);
-        info.setGravity(Gravity.TOP);
-        info.setPadding(dp(4), dp(18), dp(4), 0);
-        root.addView(info, new LinearLayout.LayoutParams(-1, dp(125)));
+        open.setOnClickListener(v -> pickVideo());
+        playPause.setOnClickListener(v -> togglePlayback());
+
+        status = label("Choose a video to begin", 12, muted);
+        status.setPadding(dp(2), dp(8), dp(2), 0);
+        root.addView(status, new LinearLayout.LayoutParams(-1, dp(30)));
 
         setContentView(root);
+        updateProgressLoop();
+    }
+
+    private Button button(String text, int bg, int fg) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextColor(fg);
+        b.setTextSize(14);
+        b.setAllCaps(false);
+        b.setBackground(round(bg, dp(16)));
+        return b;
     }
 
     private android.graphics.drawable.GradientDrawable round(int color, int radius) {
@@ -132,41 +178,169 @@ public class MainActivity extends Activity {
         return d;
     }
 
-    private void updateValue(int ms) {
-        prefs.edit().putInt("delay", ms).apply();
-        if (value != null) value.setText(ms + " ms");
-    }
-
-    private void startCapture() {
-        if (android.os.Build.VERSION.SDK_INT >= 23 &&
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
-            return;
-        }
-        MediaProjectionManager mgr =
-            (MediaProjectionManager)getSystemService(MEDIA_PROJECTION_SERVICE);
-        startActivityForResult(mgr.createScreenCaptureIntent(), REQ_CAPTURE);
+    private void pickVideo() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("video/*");
+        startActivityForResult(i, PICK_VIDEO);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request == REQ_CAPTURE && result == RESULT_OK && data != null) {
-            Intent s = new Intent(this, DelayAudioService.class);
-            s.putExtra("resultCode", result);
-            s.putExtra("data", data);
-            if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(s);
-            else startService(s);
-
-            power.setText("Stop capture");
-            status.setText("Running • audio correction active");
-            power.setOnClickListener(v -> stopDelay());
+        if (request == PICK_VIDEO && result == RESULT_OK && data != null && data.getData() != null) {
+            try {
+                getContentResolver().takePersistableUriPermission(
+                    data.getData(),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {}
+            openVideo(data.getData());
         }
     }
 
-    private void stopDelay() {
-        stopService(new Intent(this, DelayAudioService.class));
-        power.setText("Start capture");
-        status.setText("Ready");
-        power.setOnClickListener(v -> startCapture());
+    private void openVideo(Uri uri) {
+        releasePlayers();
+        videoUri = uri;
+        preparedAudio = false;
+        preparedVideo = false;
+        status.setText("Loading video…");
+        playPause.setText("Loading…");
+
+        try {
+            audioPlayer = new MediaPlayer();
+            audioPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build());
+            audioPlayer.setDataSource(this, uri);
+            audioPlayer.setOnPreparedListener(mp -> {
+                preparedAudio = true;
+                maybeReady();
+            });
+            audioPlayer.setOnCompletionListener(mp -> {
+                if (videoPlayer != null) {
+                    try { videoPlayer.pause(); } catch (Exception ignored) {}
+                }
+                playPause.setText("Play");
+            });
+
+            videoPlayer = new MediaPlayer();
+            videoPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                .build());
+            videoPlayer.setVolume(0f, 0f);
+            if (surfaceView.getHolder().getSurface().isValid()) {
+                videoPlayer.setDisplay(surfaceView.getHolder());
+            }
+            videoPlayer.setDataSource(this, uri);
+            videoPlayer.setOnPreparedListener(mp -> {
+                preparedVideo = true;
+                maybeReady();
+            });
+
+            audioPlayer.prepareAsync();
+            videoPlayer.prepareAsync();
+        } catch (Exception e) {
+            status.setText("Could not open this video");
+            playPause.setText("Play");
+        }
+    }
+
+    private void maybeReady() {
+        if (!preparedAudio || !preparedVideo) return;
+        int duration = audioPlayer.getDuration();
+        positionBar.setProgress(0);
+        time.setText(format(0) + " / " + format(duration));
+        status.setText("Ready • video will start " + delayMs() + " ms after audio");
+        playPause.setText("Play");
+    }
+
+    private boolean fromPlaying() {
+        return audioPlayer != null && preparedAudio && audioPlayer.isPlaying();
+    }
+
+    private void togglePlayback() {
+        if (!preparedAudio || !preparedVideo) return;
+        if (audioPlayer.isPlaying()) {
+            audioPlayer.pause();
+            videoPlayer.pause();
+            playPause.setText("Play");
+            return;
+        }
+        restartSynced();
+    }
+
+    private void restartSynced() {
+        if (!preparedAudio || !preparedVideo) return;
+        final int pos = audioPlayer.getCurrentPosition();
+        audioPlayer.start();
+        videoPlayer.seekTo(Math.max(0, pos));
+        handler.postDelayed(() -> {
+            if (audioPlayer != null && audioPlayer.isPlaying() && videoPlayer != null) {
+                try { videoPlayer.start(); } catch (Exception ignored) {}
+            }
+        }, delayMs());
+        playPause.setText("Pause");
+        status.setText("Playing • audio first, video delayed " + delayMs() + " ms");
+    }
+
+    private void seekBoth(int pos) {
+        if (!preparedAudio || !preparedVideo) return;
+        boolean wasPlaying = audioPlayer.isPlaying();
+        audioPlayer.pause();
+        videoPlayer.pause();
+        audioPlayer.seekTo(pos);
+        videoPlayer.seekTo(pos);
+        if (wasPlaying) restartSynced();
+    }
+
+    private void updateProgressLoop() {
+        if (audioPlayer != null && preparedAudio && !userSeeking) {
+            try {
+                int p = audioPlayer.getCurrentPosition();
+                int d = Math.max(1, audioPlayer.getDuration());
+                positionBar.setProgress((int)(p * 1000L / d));
+                time.setText(format(p) + " / " + format(d));
+            } catch (Exception ignored) {}
+        }
+        handler.postDelayed(this::updateProgressLoop, 250);
+    }
+
+    private String format(int ms) {
+        int s = Math.max(0, ms / 1000);
+        return String.format(java.util.Locale.US, "%02d:%02d", s / 60, s % 60);
+    }
+
+    private void releasePlayers() {
+        handler.removeCallbacksAndMessages(null);
+        if (audioPlayer != null) {
+            try { audioPlayer.stop(); } catch (Exception ignored) {}
+            audioPlayer.release();
+            audioPlayer = null;
+        }
+        if (videoPlayer != null) {
+            try { videoPlayer.stop(); } catch (Exception ignored) {}
+            videoPlayer.release();
+            videoPlayer = null;
+        }
+    }
+
+    @Override public void surfaceCreated(SurfaceHolder holder) {
+        if (videoPlayer != null) {
+            try { videoPlayer.setDisplay(holder); } catch (Exception ignored) {}
+        }
+    }
+
+    @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
+
+    @Override public void surfaceDestroyed(SurfaceHolder holder) {
+        if (videoPlayer != null) {
+            try { videoPlayer.setDisplay(null); } catch (Exception ignored) {}
+        }
+    }
+
+    @Override protected void onDestroy() {
+        releasePlayers();
+        super.onDestroy();
     }
 }
