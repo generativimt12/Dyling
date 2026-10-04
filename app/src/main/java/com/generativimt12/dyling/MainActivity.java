@@ -25,7 +25,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private PlayerView playerView;
-    private ExoPlayer player;
+    private ExoPlayer audioPlayer;
+    private ExoPlayer videoPlayer;
+    private Handler syncHandler = new Handler(Looper.getMainLooper());
     private Uri videoUri;
 
     private SeekBar delayBar;
@@ -170,33 +172,48 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void openVideo(Uri uri) {
         releasePlayer();
         try {
-            player = new ExoPlayer.Builder(this).build();
-            playerView.setPlayer(player);
-            player.setMediaItem(MediaItem.fromUri(uri));
-            player.prepare();
-            player.addListener(new Player.Listener() {
+            audioPlayer = new ExoPlayer.Builder(this).build();
+            videoPlayer = new ExoPlayer.Builder(this).build();
+
+            playerView.setPlayer(videoPlayer);
+            videoPlayer.setVolume(0f);
+
+            MediaItem item = MediaItem.fromUri(uri);
+            audioPlayer.setMediaItem(item);
+            videoPlayer.setMediaItem(item);
+
+            audioPlayer.prepare();
+            videoPlayer.prepare();
+            videoPlayer.pause();
+
+            Player.Listener listener = new Player.Listener() {
                 @Override public void onPlaybackStateChanged(int state) {
                     if (state == Player.STATE_READY) {
-                        status.setText("Ready • video offset: " + delayMs() + " ms");
+                        status.setText("Ready • video starts " + delayMs() + " ms after audio");
                         playPause.setText("Play");
-                    } else if (state == Player.STATE_BUFFERING) status.setText("Buffering…");
-                    else if (state == Player.STATE_ENDED) playPause.setText("Play");
+                    } else if (state == Player.STATE_BUFFERING) {
+                        status.setText("Buffering…");
+                    }
                 }
-            });
+            };
+            audioPlayer.addListener(listener);
             videoUri = uri;
             status.setText("Loading video…");
             playPause.setText("Loading…");
         } catch (Exception ex) {
             status.setText("This video could not be opened");
+            releasePlayer();
         }
     }
 
     private int delayMs() { return delayBar == null ? 300 : delayBar.getProgress(); }
 
     private void togglePlayback() {
-        if (player == null) return;
-        if (player.isPlaying()) {
-            player.pause();
+        if (audioPlayer == null || videoPlayer == null) return;
+        if (audioPlayer.isPlaying()) {
+            audioPlayer.pause();
+            videoPlayer.pause();
+            syncHandler.removeCallbacksAndMessages(null);
             playPause.setText("Play");
         } else {
             startSynced();
@@ -204,31 +221,31 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void startSynced() {
-        if (player == null) return;
-        final long audioClockPosition = player.getCurrentPosition();
-        player.setVideoFrameMetadataListener(null);
-        player.setPlayWhenReady(false);
-        player.seekTo(audioClockPosition);
-        // Media3 renders audio immediately; the video is intentionally held by disabling
-        // the video renderer for the requested offset, then re-enabled.
-        player.setVideoSurfaceView(playerView.getVideoSurfaceView());
-        player.setPlayWhenReady(true);
-        status.setText("Playing • video offset " + delayMs() + " ms");
+        if (audioPlayer == null || videoPlayer == null) return;
+        syncHandler.removeCallbacksAndMessages(null);
+
+        long pos = Math.max(0, audioPlayer.getCurrentPosition());
+        audioPlayer.seekTo(pos);
+        videoPlayer.seekTo(pos);
+        videoPlayer.pause();
+
+        // Critical design: audio begins now. Video renderer begins only after the
+        // selected offset, compensating for Bluetooth output latency.
+        audioPlayer.play();
+        syncHandler.postDelayed(() -> {
+            if (audioPlayer != null && videoPlayer != null && audioPlayer.isPlaying()) {
+                videoPlayer.play();
+            }
+        }, delayMs());
+
+        status.setText("Playing • video delayed " + delayMs() + " ms");
         playPause.setText("Pause");
-        if (delayMs() > 0) {
-            player.pause();
-            player.seekTo(audioClockPosition);
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                if (player != null) player.play();
-            }, delayMs());
-        }
     }
 
     private void releasePlayer() {
-        if (player != null) {
-            player.release();
-            player = null;
-        }
+        syncHandler.removeCallbacksAndMessages(null);
+        if (audioPlayer != null) { audioPlayer.release(); audioPlayer = null; }
+        if (videoPlayer != null) { videoPlayer.release(); videoPlayer = null; }
         if (playerView != null) playerView.setPlayer(null);
     }
 
@@ -236,4 +253,4 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         releasePlayer();
         super.onDestroy();
     }
-\n}
+}
