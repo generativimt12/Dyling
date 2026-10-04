@@ -110,10 +110,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         delayBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
                 delayValue.setText(p + " ms");
-                if (fromUser && player != null) player.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC);
+                if (fromUser && audioPlayer != null && videoPlayer != null) { audioPlayer.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC); videoPlayer.setSeekParameters(androidx.media3.exoplayer.SeekParameters.CLOSEST_SYNC); }
             }
             public void onStartTrackingTouch(SeekBar b) {}
-            public void onStopTrackingTouch(SeekBar b) { if (player != null) player.seekTo(player.getCurrentPosition()); }
+            public void onStopTrackingTouch(SeekBar b) { if (audioPlayer != null && videoPlayer != null) { long p = audioPlayer.getCurrentPosition(); audioPlayer.seekTo(p); videoPlayer.seekTo(p); } }
         });
 
         LinearLayout row = new LinearLayout(this);
